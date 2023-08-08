@@ -1,0 +1,94 @@
+{
+  "tests": [
+    {
+      "name": "Project1",
+      "setup": "",
+      "run": "./scripts/.make_target.sh project1",
+      "input": "",
+      "output": "",
+      "comparison": "included",
+      "timeout": 10,
+      "points": 5
+    },
+    {
+      "name": "Project2a",
+      "setup": "",
+      "run": "./scripts/.make_target.sh project2a",
+      "input": "",
+      "output": "",
+      "comparison": "included",
+      "timeout": 20,
+      "points": 10
+    },
+    {
+      "name": "Project2b",
+      "setup": "",
+      "run": "./scripts/.make_target.sh project2b",
+      "input": "",
+      "output": "",
+      "comparison": "included",
+      "timeout": 20,
+      "points": 10
+    },
+    {
+      "name": "Project2c",
+      "setup": "",
+      "run": "./scripts/.make_target.sh project2c",
+      "input": "",
+      "output": "",
+      "comparison": "included",
+      "timeout": 20,
+      "points": 10
+    },
+    {
+      "name": "Project3a",
+      "setup": "",
+      "run": "./scripts/.make_target.sh project3a",
+      "input": "",
+      "output": "",
+      "comparison": "included",
+      "timeout": 20,
+      "points": 10
+    },
+    {
+      "name": "Project3b",
+      "setup": "",
+      "run": "./scripts/.make_target.sh project3b",
+      "input": "",
+      "output": "",
+      "comparison": "included",
+      "timeout": 30,
+      "points": 10
+    },
+    {
+      "name": "Project3c",
+      "setup": "",
+      "run": "./scripts/.make_target.sh project3c",
+      "input": "",
+      "output": "",
+      "comparison": "included",
+      "timeout": 20,
+      "points": 10
+    },
+    {
+      "name": "Project4",
+      "setup": "",
+      "run": "./scripts/.make_target.sh project4",
+      "input": "",
+      "output": "",
+      "comparison": "included",
+      "timeout": 20,
+      "points": 15
+    },
+    {
+      "name": "Perf",
+      "setup": "",
+      "run": "./scripts/.get_perf.sh",
+      "input": "",
+      "output": "PASS",
+      "comparison": "exact",
+      "timeout": 5,
+      "points": 20
+    }
+  ]
+}
