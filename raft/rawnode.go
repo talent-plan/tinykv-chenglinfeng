@@ -70,12 +70,22 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	prevSoftSt *SoftState   // 上一阶段的 Soft State
+	prevHardSt pb.HardState // 上一阶段的 Hard State
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	rn := &RawNode{
+		Raft: newRaft(config), // 创建底层 Raft 节点
+	}
+	rn.prevHardSt, _, _ = config.Storage.InitialState()
+	rn.prevSoftSt = &SoftState{
+		Lead:      rn.Raft.Lead,
+		RaftState: rn.Raft.State,
+	}
+	return rn, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,19 +153,74 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	rd := Ready{
+		Messages:         rn.Raft.msgs,                      //在日志被写入到 Storage 之后需要发送的Msg消息
+		Entries:          rn.Raft.RaftLog.unstableEntries(), //写入到 Storage 的日志进行持久化 【stabled+1，last】
+		CommittedEntries: rn.Raft.RaftLog.nextEnts(),        //待 apply (applied，committed] 之间的日志
+	}
+	if rn.isSoftStateUpdate() {
+		// 虽然 SoftState 不需要持久化，但是检测到 SoftState 更新的时候需要获取
+		// 测试用例会用到（单纯的从 Raft 角度分析的话，这部分数据没有获取的必要）
+		rd.SoftState = &SoftState{Lead: rn.Raft.Lead, RaftState: rn.Raft.State}
+		rn.prevSoftSt = rd.SoftState
+	}
+	if rn.isHardStateUpdate() {
+		rd.HardState = pb.HardState{
+			Term:   rn.Raft.Term,
+			Vote:   rn.Raft.Vote,
+			Commit: rn.Raft.RaftLog.committed,
+		}
+	}
+	//3A
+	//if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
+	//	rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+	//}
+	return rd
+}
+
+// softStateUpdate 检查 SoftState 是否有更新
+func (rn *RawNode) isSoftStateUpdate() bool {
+	return rn.Raft.Lead != rn.prevSoftSt.Lead || rn.Raft.State != rn.prevSoftSt.RaftState
+}
+
+// hardStateUpdate 检查 HardState 是否有更新
+func (rn *RawNode) isHardStateUpdate() bool {
+	return rn.Raft.Term != rn.prevHardSt.Term || rn.Raft.Vote != rn.prevHardSt.Vote ||
+		rn.Raft.RaftLog.committed != rn.prevHardSt.Commit
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return false
+	return len(rn.Raft.msgs) > 0 || //是否有需要发送的 Msg
+		rn.isHardStateUpdate() || //是否有需要持久化的状态
+		len(rn.Raft.RaftLog.unstableEntries()) > 0 || //是否有需要应用的条目
+		len(rn.Raft.RaftLog.nextEnts()) > 0 || //是否有需要持久化的条目
+		!IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) //是否有需要应用的快照
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	// 不等于 nil 说明上次执行 Ready 更新了 softState
+	if rd.SoftState != nil {
+		rn.prevSoftSt = rd.SoftState
+	}
+	// 检查 HardState 是否是默认值，默认值说明没有更新，此时不应该更新 prevHardSt
+	if !IsEmptyHardState(rd.HardState) {
+		rn.prevHardSt = rd.HardState //prevHardSt 变更；
+	}
+	// 更新 RaftLog 状态
+	if len(rd.Entries) > 0 {
+		rn.Raft.RaftLog.stabled += uint64(len(rd.Entries)) //stabled 指针变更；
+	}
+	if len(rd.CommittedEntries) > 0 {
+		rn.Raft.RaftLog.applied += uint64(len(rd.CommittedEntries)) //applied 指针变更；
+	}
+	rn.Raft.RaftLog.maybeCompact()        //丢弃被压缩的暂存日志；
+	rn.Raft.RaftLog.pendingSnapshot = nil //清空 pendingSnapshot；
+	rn.Raft.msgs = nil                    //清空 rn.Raft.msgs；
 }
 
 // GetProgress return the Progress of this node and its peers, if this
