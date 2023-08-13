@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/log"
 	rand2 "math/rand"
 	"sort"
 	"time"
@@ -243,7 +244,31 @@ func (r *Raft) sendAppend(to uint64) bool {
 		r.msgs = append(r.msgs, appendMsg)
 		return true
 	}
+	// 有错误，说明 nextIndex 存在于快照中，此时需要发送快照给 followers
+	//2C
+	r.sendSnapshot(to)
+	log.Infof("[Snapshot Request]%d to %d, prevLogIndex %v, dummyIndex %v", r.id, to, prevLogIndex, r.RaftLog.dummyIndex)
+
 	return false
+}
+
+// sendSnapshot 发送快照给别的节点
+func (r *Raft) sendSnapshot(to uint64) {
+	snapshot, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		// 生成 Snapshot 的工作是由 region worker 异步执行的，如果 Snapshot 还没有准备好
+		// 此时会返回 ErrSnapshotTemporarilyUnavailable 错误，此时 leader 应该放弃本次 Snapshot Request
+		// 等待下一次再请求 storage 获取 snapshot（通常来说会在下一次 heartbeat response 的时候发送 snapshot）
+		return
+	}
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		From:     r.id,
+		To:       to,
+		Term:     r.Term,
+		Snapshot: &snapshot,
+	})
+	r.Prs[to].Next = snapshot.Metadata.Index + 1
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -398,6 +423,7 @@ func (r *Raft) followerStep(m pb.Message) {
 	case pb.MessageType_MsgSnapshot:
 		//Common Msg，用于 Leader 将快照发送给其他节点
 		//TODO Follower No processing required
+		r.handleSnapshot(m)
 	case pb.MessageType_MsgHeartbeat:
 		//Common Msg，即 Leader 发送的心跳。
 		//不同于论文中使用空的追加日志 RPC 代表心跳，TinyKV 给心跳一个单独的 MsgType
@@ -449,6 +475,7 @@ func (r *Raft) candidateStep(m pb.Message) {
 	case pb.MessageType_MsgSnapshot:
 		//Common Msg，用于 Leader 将快照发送给其他节点
 		//TODO Candidate No processing required
+		r.handleSnapshot(m)
 	case pb.MessageType_MsgHeartbeat:
 		//Common Msg，即 Leader 发送的心跳。
 		//不同于论文中使用空的追加日志 RPC 代表心跳，TinyKV 给心跳一个单独的 MsgType
@@ -535,7 +562,7 @@ func (r *Raft) removeNode(id uint64) {
 
 /* ******************************** Msg Handle ******************************** */
 
-//成为候选者，开始发起投票
+// 成为候选者，开始发起投票
 func (r *Raft) handleStartElection(m pb.Message) {
 	r.becomeCandidate()
 	if len(r.Prs) == 1 {
@@ -590,7 +617,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 }
 
 // handleAppendEntries handle AppendEntries RPC request
-//用于 Leader 给其他节点同步日志条目
+// 用于 Leader 给其他节点同步日志条目
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
 
@@ -755,9 +782,43 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	r.msgs = append(r.msgs, heartBeatResp)
 }
 
-// handleSnapshot handle Snapshot RPC request
+// 从 SnapshotMetadata 中恢复 Raft 的内部状态，例如 term、commit、membership information
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	resp := pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		From:    r.id,
+		Term:    r.Term,
+	}
+	meta := m.Snapshot.Metadata
+
+	// 1. 如果 term 小于自身的 term 直接拒绝这次快照的数据
+	if m.Term < r.Term {
+		resp.Reject = true
+	} else if r.RaftLog.committed >= meta.Index {
+		// 2. 如果已经提交的日志大于等于快照中的日志，也需要拒绝这次快照
+		// 因为 commit 的日志必定会被 apply，如果被快照中的日志覆盖的话就会破坏一致性
+		resp.Reject = true
+		resp.Index = r.RaftLog.committed
+	} else {
+		// 3. 需要安装日志
+		r.becomeFollower(m.Term, m.From)
+		// 更新日志数据
+		r.RaftLog.dummyIndex = meta.Index + 1
+		r.RaftLog.committed = meta.Index
+		r.RaftLog.applied = meta.Index
+		r.RaftLog.stabled = meta.Index
+		r.RaftLog.pendingSnapshot = m.Snapshot
+		r.RaftLog.entries = make([]pb.Entry, 0)
+		// 更新集群配置
+		r.Prs = make(map[uint64]*Progress)
+		for _, id := range meta.ConfState.Nodes {
+			r.Prs[id] = &Progress{Next: r.RaftLog.LastIndex() + 1}
+		}
+		// 更新 response，提示 leader 更新 nextIndex
+		resp.Index = meta.Index
+	}
+	r.msgs = append(r.msgs, resp)
 }
 
 // handleRequestVoteResponse 节点收到 RequestVote Response 时候的处理

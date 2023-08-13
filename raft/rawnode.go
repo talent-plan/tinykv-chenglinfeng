@@ -162,7 +162,7 @@ func (rn *RawNode) Ready() Ready {
 		// 虽然 SoftState 不需要持久化，但是检测到 SoftState 更新的时候需要获取
 		// 测试用例会用到（单纯的从 Raft 角度分析的话，这部分数据没有获取的必要）
 		rd.SoftState = &SoftState{Lead: rn.Raft.Lead, RaftState: rn.Raft.State}
-		rn.prevSoftSt = rd.SoftState
+		// rn.prevSoftSt = rd.SoftState
 	}
 	if rn.isHardStateUpdate() {
 		rd.HardState = pb.HardState{
@@ -172,9 +172,9 @@ func (rn *RawNode) Ready() Ready {
 		}
 	}
 	//3A
-	//if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
-	//	rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
-	//}
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
+		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+	}
 	return rd
 }
 
