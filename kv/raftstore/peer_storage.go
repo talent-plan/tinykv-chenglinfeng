@@ -306,8 +306,28 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 
 // Append the given entries to the raft log and update ps.raftState also delete log entries that will
 // never be committed
+// 负责将 Ready 中的 entries 持久化到 raftDB 中去，然后更新 RaftLoaclState 的状态。同时，如果底层存储有冲突条目，则将其删除。
+// 将给定的条目附加到raft日志并更新ps.raftState，同时删除永远不会提交的日志条目
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	if len(entries) == 0 {
+		return nil
+	}
+	// 将所有的 Entry 都添加到 WriteBatch 中
+	for _, ent := range entries {
+		if err := raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, ent.Index), &ent); err != nil {
+			log.Panic(err)
+		}
+	}
+	// 由于已经持久化的日志可能会因为冲突而被 leader 覆盖掉，对于这部分数据也需要在存储引擎中删除
+	// ......stabled -> ......truncated......currLastIndex......stabled
+	// 对于 [truncated, stabled] 中的日志本应该全都删除，但是 [truncated, currLastIndex] 中的数据只需要修改就可以了
+	currLastTerm, currLastIndex := entries[len(entries)-1].Term, entries[len(entries)-1].Index
+	prevLastIndex, _ := ps.LastIndex() // prevLastIndex 对应 RaftLog 中的 stabled
+	for index := currLastIndex + 1; index <= prevLastIndex; index++ {
+		raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, index))
+	}
+	ps.raftState.LastTerm, ps.raftState.LastIndex = currLastTerm, currLastIndex // 更新 RaftLocalState
 	return nil
 }
 
@@ -327,11 +347,39 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 }
 
 // Save memory states to disk.
+//	将内存状态保存到磁盘。持久化
+//将 raft.Ready 中的数据保存到 badger 中，包括追加日志和保存 Raft 硬状态。
 // Do not modify ready in this function, this is a requirement to advance the ready object properly later.
+//不要在此函数中修改ready，这是稍后正确推进ready对象的要求。
+// 处理 Ready 中的 Entries 和 HardState 数据
+
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	return nil, nil
+	raftWB := &engine_util.WriteBatch{}
+	var result *ApplySnapResult
+	var err error
+	// 1. 通过 raft.isEmptySnap() 方法判断是否存在 Snapshot，如果有，则调用ApplySnapshot() 方法应用；
+	//if !raft.IsEmptySnap(&ready.Snapshot) {
+	//	kvWB := &engine_util.WriteBatch{}
+	//	result, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+	//	kvWB.MustWriteToDB(ps.Engines.Kv)
+	//}
+	// 2. 调用 Append() 将需要持久化的 entries 保存到 raftDB；
+	if err = ps.Append(ready.Entries, raftWB); err != nil {
+		log.Panic(err)
+	}
+	// 3. 保存 ready 中的 HardState 到 ps.raftState.HardState，注意先使用raft.isEmptyHardState() 进行判空；
+	if !raft.IsEmptyHardState(ready.HardState) {
+		*ps.raftState.HardState = ready.HardState
+	}
+	// 4. 持久化 RaftLocalState 到 raftDB；
+	if err = raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState); err != nil {
+		log.Panic(err)
+	}
+	// 5. 通过 raftWB.WriteToDB 和 kvWB.WriteToDB 进行原子的写入到存储引擎
+	raftWB.MustWriteToDB(ps.Engines.Raft)
+	return result, nil
 }
 
 func (ps *PeerStorage) ClearData() {
