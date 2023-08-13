@@ -279,7 +279,32 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
-
+	epoch := region.GetRegionEpoch()
+	if epoch == nil {
+		return errors.Errorf("region has no epoch")
+	}
+	// 1. 检查是否有两个 region 的 id 是一样的
+	oldRegion := c.GetRegion(region.GetID())
+	if oldRegion != nil {
+		oldEpoch := oldRegion.GetRegionEpoch()
+		if epoch.ConfVer < oldEpoch.ConfVer || epoch.Version < oldEpoch.Version {
+			return errors.Errorf("region is stale")
+		}
+	} else {
+		// 2. 扫描所有重叠的 region
+		regions := c.ScanRegions(region.GetStartKey(), region.GetEndKey(), -1)
+		for _, r := range regions {
+			rEpoch := r.GetRegionEpoch()
+			if epoch.ConfVer < rEpoch.ConfVer || epoch.Version < rEpoch.Version {
+				return errors.Errorf("region is stale")
+			}
+		}
+	}
+	// region 是最新的，更新 region tree 和 store status
+	c.putRegion(region)
+	for i := range region.GetStoreIds() {
+		c.updateStoreStatusLocked(i)
+	}
 	return nil
 }
 
